@@ -18,6 +18,7 @@ class _HomePageState extends State<HomePage> {
   bool _isLoading = false;
   String? _filePath;
   bool _repeatMode = false; // Flag to track repeat mode
+  bool _repeatAllMode = false; // Flag to track repeat all mode
   final AudioPlayer _audioPlayer = AudioPlayer();
   List<Map<String, String>> _downloadedFiles = [];
 
@@ -69,6 +70,12 @@ class _HomePageState extends State<HomePage> {
           setState(() {
             _currentSong = _downloadedFiles[nextIndex];
           });
+        } else if (_repeatAllMode && _downloadedFiles.isNotEmpty) {
+          // If repeat all is enabled and we're at the end of the list, go back to first song
+          _playMp3(_downloadedFiles[0]['path']!);
+          setState(() {
+            _currentSong = _downloadedFiles[0];
+          });
         } else {
           setState(() {
             _playerState = PlayerState.stopped;
@@ -77,6 +84,23 @@ class _HomePageState extends State<HomePage> {
         }
       }
     });
+  }
+
+  void _toggleRepeatAllMode(StateSetter setModalState) {
+    setState(() {
+      _repeatAllMode = !_repeatAllMode;
+      // If enabling repeat all, disable single song repeat
+      if (_repeatAllMode && _repeatMode) {
+        _repeatMode = false;
+      }
+    });
+
+    setModalState(() {
+      _repeatAllMode = _repeatAllMode;
+      _repeatMode = _repeatMode;
+    });
+
+    _showMessage(_repeatAllMode ? "Repeat all mode enabled" : "Repeat all mode disabled");
   }
 
   Future<void> _scanMp3Directory() async {
@@ -449,11 +473,17 @@ class _HomePageState extends State<HomePage> {
     // Close any existing bottom sheet first
     Navigator.of(context).popUntil((route) => route.isFirst);
 
-    setState(() {
-      _currentSong = song;
-    });
+    // Only set current song and start playing if it's a different song or not playing
+    bool shouldStartPlaying = _currentSong == null ||
+        _currentSong!['path'] != song['path'] ||
+        _playerState == PlayerState.stopped;
 
-    _playMp3(song['path']!);
+    if (shouldStartPlaying) {
+      setState(() {
+        _currentSong = song;
+      });
+      _playMp3(song['path']!);
+    }
 
     showModalBottomSheet(
       context: context,
@@ -629,17 +659,31 @@ class _HomePageState extends State<HomePage> {
 
                   const SizedBox(height: 10),
                   // Repeat and shuffle buttons
+                  // Repeat and shuffle buttons
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
+                      // Repeat one button
                       IconButton(
                         iconSize: 30,
                         icon: Icon(
-                          _repeatMode ? Icons.repeat_on : Icons.repeat,
+                          _repeatMode ? Icons.repeat_one : Icons.repeat,
                           color: _repeatMode ? Colors.blue : Colors.grey,
                         ),
                         onPressed: () {
                           _toggleRepeatMode(setModalState);
+                        },
+                      ),
+
+                      // Repeat all button (new)
+                      IconButton(
+                        iconSize: 30,
+                        icon: Icon(
+                          Icons.repeat_on,
+                          color: _repeatAllMode ? Colors.green : Colors.grey,
+                        ),
+                        onPressed: () {
+                          _toggleRepeatAllMode(setModalState);
                         },
                       ),
                     ],
@@ -793,6 +837,12 @@ class _HomePageState extends State<HomePage> {
               ],
             ),
           ),
+
+          // Add bottom padding when the mini-player is showing
+          bottomNavigationBar: _playerState != PlayerState.stopped && _currentSong != null
+              ? _buildMiniPlayer()
+              : null,
+
         ),
 
         // Loading overlay with progress
@@ -820,4 +870,102 @@ class _HomePageState extends State<HomePage> {
       ],
     );
   }
+
+  Widget _buildMiniPlayer() {
+    return GestureDetector(
+      onTap: () {
+        // Open the full player when mini-player is tapped
+        if (_currentSong != null) {
+          _showMusicPlayer(_currentSong!);
+        }
+      },
+      child: Container(
+        height: 70,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.grey.withOpacity(0.3),
+              spreadRadius: 1,
+              blurRadius: 5,
+              offset: const Offset(0, -1),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            // Song thumbnail/icon
+            Container(
+              width: 50,
+              height: 50,
+              margin: const EdgeInsets.only(left: 10),
+              decoration: BoxDecoration(
+                color: Colors.grey[200],
+                borderRadius: BorderRadius.circular(5),
+              ),
+              child: const Icon(Icons.music_note, color: Colors.blue),
+            ),
+
+            // Song title and progress
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      _currentSong?['name'] ?? 'Unknown',
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 5),
+                    // Linear progress indicator
+                    StreamBuilder<Duration>(
+                      stream: _audioPlayer.onPositionChanged,
+                      builder: (context, snapshot) {
+                        final position = snapshot.data ?? Duration.zero;
+                        final progress = _duration.inMilliseconds > 0
+                            ? position.inMilliseconds / _duration.inMilliseconds
+                            : 0.0;
+                        return LinearProgressIndicator(
+                          value: progress.clamp(0.0, 1.0),
+                          backgroundColor: Colors.grey[300],
+                          valueColor: const AlwaysStoppedAnimation<Color>(Colors.blue),
+                        );
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+            // Control buttons
+            Row(
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.skip_previous),
+                  onPressed: _playPreviousSong,
+                ),
+                IconButton(
+                  icon: Icon(
+                    _playerState == PlayerState.playing
+                        ? Icons.pause
+                        : Icons.play_arrow,
+                  ),
+                  onPressed: _pauseResume,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.skip_next),
+                  onPressed: _playNextSong,
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
 }
