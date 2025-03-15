@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:dio/dio.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -20,6 +20,8 @@ class _HomePageState extends State<HomePage> {
   bool _repeatMode = false; // Flag to track repeat mode
   final AudioPlayer _audioPlayer = AudioPlayer();
   List<Map<String, String>> _downloadedFiles = [];
+
+  double _downloadProgress = 0.0;
 
   // Track current playing song
   Map<String, String>? _currentSong;
@@ -150,7 +152,7 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    // Request permissions first (for Android)
+    // Request storage permissions for Android
     if (Platform.isAndroid) {
       var status = await Permission.storage.status;
       if (!status.isGranted) {
@@ -164,66 +166,79 @@ class _HomePageState extends State<HomePage> {
 
     setState(() {
       _isLoading = true;
+      _downloadProgress = 0.0; // Reset progress
     });
 
     try {
       var apiUrl = "http://192.168.0.4:8000/api/download-mp3";
-      var response = await http.post(
-        Uri.parse(apiUrl),
-        body: {"url": youtubeUrl},
+
+      Dio dio = Dio();
+
+      // Make request to get the file
+      var response = await dio.post(
+        apiUrl,
+        data: {"url": youtubeUrl},
+        options: Options(
+          responseType: ResponseType.stream,
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        ),
+        onReceiveProgress: (received, total) {
+          if (total != -1) {
+            setState(() {
+              _downloadProgress = received / total;
+            });
+          }
+        },
       );
 
-      debugPrint("Response status: ${response.statusCode}");
+      // Get and sanitize filename
+      String fileName = _extractFileName(response);
+      fileName = _sanitizeFileName(fileName); // Ensure valid filename
 
-      if (response.statusCode == 200) {
-        String fileName = "downloaded_audio.mp3";
-        String? contentDisposition = response.headers["content-disposition"];
-        if (contentDisposition != null && contentDisposition.contains("filename=")) {
-          fileName = contentDisposition.split("filename=")[1].replaceAll("\"", "");
-        }
+      // Create app folder in device storage
+      Directory? directory;
 
-        // Create app folder in device storage
-        Directory? directory;
-
-        if (Platform.isAndroid) {
-          // For Android: Use the Download directory
-          directory = Directory('/storage/emulated/0/Download/YTtoMP3');
-
-          // Alternative approach using getExternalStorageDirectory
-          // directory = await getExternalStorageDirectory();
-          // directory = Directory('${directory!.path}/YTtoMP3');
-        } else if (Platform.isIOS) {
-          // For iOS: Use the Documents directory
-          directory = await getApplicationDocumentsDirectory();
-          directory = Directory('${directory.path}/YTtoMP3');
-        }
-
-        // Create the directory if it doesn't exist
-        if (!(await directory!.exists())) {
-          await directory.create(recursive: true);
-        }
-
-        String filePath = "${directory.path}/$fileName";
-        File file = File(filePath);
-        await file.writeAsBytes(response.bodyBytes);
-
-        setState(() {
-          if (_audioPlayer.state != PlayerState.playing) {
-            _filePath = filePath;
-          }
-          _downloadedFiles.add({"name": fileName, "path": filePath});
-          _isLoading = false;
-        });
-
-        // Save the updated list to preferences
-        _saveDownloadedFiles();
-
-        _urlController.clear();
-
-        _showMessage("Download complete! File saved to ${directory.path}");
-      } else {
-        _showMessage("Failed to convert. Please try again.");
+      if (Platform.isAndroid) {
+        directory = Directory('/storage/emulated/0/Download/YTtoMP3');
+      } else if (Platform.isIOS) {
+        directory = await getApplicationDocumentsDirectory();
+        directory = Directory('${directory.path}/YTtoMP3');
       }
+
+      // Create directory if it doesn't exist
+      if (!(await directory!.exists())) {
+        await directory.create(recursive: true);
+      }
+
+      String filePath = "${directory.path}/$fileName";
+      File file = File(filePath);
+
+      // Write the file with progress tracking
+      List<int> bytes = [];
+      await for (var chunk in response.data.stream) {
+        bytes.addAll(chunk);
+      }
+
+      await file.writeAsBytes(bytes);
+
+      setState(() {
+        if (_audioPlayer.state != PlayerState.playing) {
+          _filePath = filePath;
+        }
+        _downloadedFiles.add({"name": fileName, "path": filePath});
+        _isLoading = false;
+        _downloadProgress = 1.0; // Complete
+      });
+
+      // Save the updated list to preferences
+      _saveDownloadedFiles();
+
+      _urlController.clear();
+
+      _showMessage("Download complete! File saved to ${directory.path}");
     } catch (e) {
       debugPrint("Error: $e");
       _showMessage("Error: $e");
@@ -232,6 +247,29 @@ class _HomePageState extends State<HomePage> {
         _isLoading = false;
       });
     }
+  }
+
+  String _extractFileName(Response response) {
+    String defaultFileName = "downloaded_audio.mp3";
+    String? contentDisposition = response.headers.value("content-disposition");
+
+    if (contentDisposition != null && contentDisposition.contains("filename=")) {
+      // Correct regex: Handles both UTF-8 and standard filenames
+      RegExp regExp = RegExp(r'filename\*?=(?:utf-8\\|")?([^";]+)');
+      Match? match = regExp.firstMatch(contentDisposition);
+
+      if (match != null && match.group(1) != null) {
+        return Uri.decodeFull(match.group(1)!.replaceAll('"', '').replaceAll("'", ""));
+      }
+    }
+    return defaultFileName;
+  }
+
+  String _sanitizeFileName(String fileName) {
+    return fileName
+        .replaceAll(RegExp(r'[<>:"/\\|?*;]'), '') // Remove invalid characters
+        .replaceAll(RegExp(r'\s+'), ' ') // Replace multiple spaces with a single space
+        .trim();
   }
 
   Future<void> _renameFile(Map<String, String> file, String newTitle) async {
@@ -630,129 +668,156 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        title: const Text('YouTube to MP3'),
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          children: <Widget>[
-            Expanded(
-              child: _downloadedFiles.isEmpty
-                  ? const Center(child: Text("No downloads yet"))
-                  : ListView.builder(
-                itemCount: _downloadedFiles.length,
-                itemBuilder: (context, index) {
-                  bool isPlaying = _currentSong != null &&
-                      _currentSong!['path'] == _downloadedFiles[index]['path'] &&
-                      _playerState == PlayerState.playing;
-
-                  return ListTile(
-                    leading: Icon(
-                      isPlaying ? Icons.pause_circle_filled : Icons.music_note,
-                      color: isPlaying ? Colors.blue : Colors.grey,
-                      size: 40,
-                    ),
-                    title: Text(_downloadedFiles[index]['name'] ?? 'Unknown'),
-                    subtitle: Text(isPlaying ? "Now playing" : "Tap to play"),
-                    trailing: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        // Edit button
-                        IconButton(
-                          icon: const Icon(Icons.edit, color: Colors.blue),
-                          onPressed: () {
-                            _showEditDialog(_downloadedFiles[index]);
-                          },
+    return Stack(
+      children: [
+        Scaffold(
+          appBar: AppBar(
+            backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+            title: const Text('YouTube to MP3'),
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.download),
+                onPressed: () {
+                  showDialog(
+                    context: context,
+                    builder: (context) {
+                      return Dialog(
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12.0)), // Optional: Rounded corners
+                        child: Padding(
+                          padding: const EdgeInsets.all(16.0),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Text(
+                                "Enter YouTube URL",
+                                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                              ),
+                              const SizedBox(height: 10),
+                              TextField(
+                                controller: _urlController,
+                                decoration: const InputDecoration(
+                                  labelText: "YouTube URL",
+                                  border: OutlineInputBorder(),
+                                ),
+                              ),
+                              const SizedBox(height: 10),
+                              ElevatedButton(
+                                onPressed: () {
+                                  Navigator.pop(context);
+                                  _convertToMp3();
+                                },
+                                child: const Text("Download MP3"),
+                              ),
+                            ],
+                          ),
                         ),
-                        // Delete button
-                        IconButton(
-                          icon: const Icon(Icons.delete, color: Colors.red),
-                          onPressed: () async {
-                            bool confirm = await showDialog(
-                              context: context,
-                              barrierDismissible: false,
-                              builder: (BuildContext context) {
-                                return AlertDialog(
-                                  title: const Text("Confirm Delete"),
-                                  content: Text("Are you sure you want to delete ${_downloadedFiles[index]['name']}?"),
-                                  actions: [
-                                    TextButton(
-                                      onPressed: () => Navigator.of(context).pop(false),
-                                      child: const Text("CANCEL"),
-                                    ),
-                                    TextButton(
-                                      onPressed: () => Navigator.of(context).pop(true),
-                                      child: const Text("DELETE"),
-                                    ),
-                                  ],
-                                );
-                              },
-                            );
-
-                            if (confirm) {
-                              _deleteFile(_downloadedFiles[index]);
-                            }
-                          },
-                        ),
-                      ],
-                    ),
-                    onTap: () {
-                      _showMusicPlayer(_downloadedFiles[index]);
+                      );
                     },
                   );
                 },
               ),
-            ),
-          ],
-        ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () {
-          showModalBottomSheet(
-            context: context,
-            isScrollControlled: true,
-            builder: (context) {
-              return Padding(
-                padding: MediaQuery.of(context).viewInsets,
-                child: SingleChildScrollView(
-                  child: Container(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Text(
-                          "Enter YouTube URL",
-                          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ],
+          ),
+          body: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              children: <Widget>[
+                Expanded(
+                  child: _downloadedFiles.isEmpty
+                      ? const Center(child: Text("No downloads yet"))
+                      : ListView.builder(
+                    itemCount: _downloadedFiles.length,
+                    itemBuilder: (context, index) {
+                      bool isPlaying = _currentSong != null &&
+                          _currentSong!['path'] == _downloadedFiles[index]['path'] &&
+                          _playerState == PlayerState.playing;
+
+                      return ListTile(
+                        leading: Icon(
+                          isPlaying ? Icons.pause_circle_filled : Icons.music_note,
+                          color: isPlaying ? Colors.blue : Colors.grey,
+                          size: 40,
                         ),
-                        const SizedBox(height: 10),
-                        TextField(
-                          controller: _urlController,
-                          decoration: const InputDecoration(
-                            labelText: "YouTube URL",
-                            border: OutlineInputBorder(),
-                          ),
+                        title: Text(_downloadedFiles[index]['name'] ?? 'Unknown'),
+                        subtitle: Text(isPlaying ? "Now playing" : "Tap to play"),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            // Edit button
+                            IconButton(
+                              icon: const Icon(Icons.edit, color: Colors.blue),
+                              onPressed: () {
+                                _showEditDialog(_downloadedFiles[index]);
+                              },
+                            ),
+                            // Delete button
+                            IconButton(
+                              icon: const Icon(Icons.delete, color: Colors.red),
+                              onPressed: () async {
+                                bool confirm = await showDialog(
+                                  context: context,
+                                  barrierDismissible: false,
+                                  builder: (BuildContext context) {
+                                    return AlertDialog(
+                                      title: const Text("Confirm Delete"),
+                                      content: Text(
+                                          "Are you sure you want to delete ${_downloadedFiles[index]['name']}?"),
+                                      actions: [
+                                        TextButton(
+                                          onPressed: () => Navigator.of(context).pop(false),
+                                          child: const Text("CANCEL"),
+                                        ),
+                                        TextButton(
+                                          onPressed: () => Navigator.of(context).pop(true),
+                                          child: const Text("DELETE"),
+                                        ),
+                                      ],
+                                    );
+                                  },
+                                );
+
+                                if (confirm) {
+                                  _deleteFile(_downloadedFiles[index]);
+                                }
+                              },
+                            ),
+                          ],
                         ),
-                        const SizedBox(height: 10),
-                        ElevatedButton(
-                          onPressed: () {
-                            Navigator.pop(context);
-                            _convertToMp3();
-                          },
-                          child: const Text("Download MP3"),
-                        ),
-                      ],
-                    ),
+                        onTap: () {
+                          _showMusicPlayer(_downloadedFiles[index]);
+                        },
+                      );
+                    },
                   ),
                 ),
-              );
-            },
-          );
-        },
-        child: const Icon(Icons.download),
-      ),
+              ],
+            ),
+          ),
+        ),
+
+        // Loading overlay with progress
+        if (_isLoading)
+          Container(
+            color: Colors.black.withOpacity(0.5),
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  CircularProgressIndicator(
+                    value: _downloadProgress > 0 ? _downloadProgress : null,
+                    valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
+                    strokeWidth: 5,
+                  ),
+                  const SizedBox(height: 20),
+                  Text(
+                    "Downloading... ${(_downloadProgress * 100).toStringAsFixed(1)}%",
+                    style: const TextStyle(color: Colors.white, fontSize: 16),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
     );
   }
 }
