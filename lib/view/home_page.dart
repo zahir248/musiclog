@@ -3,6 +3,8 @@ import 'package:http/http.dart' as http;
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 import 'package:audioplayers/audioplayers.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -30,6 +32,9 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
+
+    // Scan the directory for MP3 files when app starts
+    _scanMp3Directory();
 
     // Set up listeners for audio player
     _audioPlayer.onPlayerStateChanged.listen((state) {
@@ -72,6 +77,72 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
+  Future<void> _scanMp3Directory() async {
+    try {
+      Directory directory = Directory('/storage/emulated/0/Download/YTtoMP3');
+
+      if (await directory.exists()) {
+        List<FileSystemEntity> files = directory.listSync();
+        List<Map<String, String>> mp3Files = [];
+
+        for (var file in files) {
+          if (file is File && file.path.toLowerCase().endsWith('.mp3')) {
+            String fileName = file.path.split('/').last;
+            mp3Files.add({"name": fileName, "path": file.path});
+          }
+        }
+
+        setState(() {
+          _downloadedFiles = mp3Files;
+        });
+      } else {
+        // Create directory if it doesn't exist
+        await directory.create(recursive: true);
+      }
+    } catch (e) {
+      debugPrint("Error scanning MP3 directory: $e");
+      _showMessage("Error scanning MP3 directory: $e");
+    }
+  }
+
+  Future<void> _deleteFile(Map<String, String> file) async {
+    try {
+      File fileToDelete = File(file['path']!);
+
+      // Check if file exists
+      if (await fileToDelete.exists()) {
+        // Check if this is the currently playing file
+        bool isCurrentlyPlaying = _currentSong != null &&
+            _currentSong!['path'] == file['path'] &&
+            _playerState == PlayerState.playing;
+
+        // If it's playing, stop it first
+        if (isCurrentlyPlaying) {
+          await _audioPlayer.stop();
+          setState(() {
+            _currentSong = null;
+            _playerState = PlayerState.stopped;
+          });
+        }
+
+        // Delete the file
+        await fileToDelete.delete();
+
+        // Remove from list
+        setState(() {
+          _downloadedFiles.removeWhere((item) => item['path'] == file['path']);
+        });
+
+        _showMessage("File deleted successfully");
+      } else {
+        _showMessage("File not found");
+      }
+    } catch (e) {
+      debugPrint("Error deleting file: $e");
+      _showMessage("Error deleting file: $e");
+    }
+  }
+
   Future<void> _convertToMp3() async {
     String youtubeUrl = _urlController.text.trim();
     if (youtubeUrl.isEmpty) {
@@ -79,12 +150,24 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
+    // Request permissions first (for Android)
+    if (Platform.isAndroid) {
+      var status = await Permission.storage.status;
+      if (!status.isGranted) {
+        status = await Permission.storage.request();
+        if (!status.isGranted) {
+          _showMessage("Storage permission is required");
+          return;
+        }
+      }
+    }
+
     setState(() {
       _isLoading = true;
     });
 
     try {
-      var apiUrl = "http://192.168.0.42:8000/api/download-mp3";
+      var apiUrl = "http://192.168.0.4:8000/api/download-mp3";
       var response = await http.post(
         Uri.parse(apiUrl),
         body: {"url": youtubeUrl},
@@ -99,13 +182,32 @@ class _HomePageState extends State<HomePage> {
           fileName = contentDisposition.split("filename=")[1].replaceAll("\"", "");
         }
 
-        Directory appDir = await getApplicationDocumentsDirectory();
-        String filePath = "${appDir.path}/$fileName";
+        // Create app folder in device storage
+        Directory? directory;
+
+        if (Platform.isAndroid) {
+          // For Android: Use the Download directory
+          directory = Directory('/storage/emulated/0/Download/YTtoMP3');
+
+          // Alternative approach using getExternalStorageDirectory
+          // directory = await getExternalStorageDirectory();
+          // directory = Directory('${directory!.path}/YTtoMP3');
+        } else if (Platform.isIOS) {
+          // For iOS: Use the Documents directory
+          directory = await getApplicationDocumentsDirectory();
+          directory = Directory('${directory.path}/YTtoMP3');
+        }
+
+        // Create the directory if it doesn't exist
+        if (!(await directory!.exists())) {
+          await directory.create(recursive: true);
+        }
+
+        String filePath = "${directory.path}/$fileName";
         File file = File(filePath);
         await file.writeAsBytes(response.bodyBytes);
 
         setState(() {
-          // Do not override `_filePath` if a song is already playing
           if (_audioPlayer.state != PlayerState.playing) {
             _filePath = filePath;
           }
@@ -113,13 +215,12 @@ class _HomePageState extends State<HomePage> {
           _isLoading = false;
         });
 
+        // Save the updated list to preferences
+        _saveDownloadedFiles();
+
         _urlController.clear();
 
-        Future.delayed(const Duration(milliseconds: 300), () {
-          setState(() {});
-        });
-
-        _showMessage("Download complete! Tap to play.");
+        _showMessage("Download complete! File saved to ${directory.path}");
       } else {
         _showMessage("Failed to convert. Please try again.");
       }
@@ -131,6 +232,107 @@ class _HomePageState extends State<HomePage> {
         _isLoading = false;
       });
     }
+  }
+
+  Future<void> _renameFile(Map<String, String> file, String newTitle) async {
+    try {
+      // Get the current file path and create a File object
+      File currentFile = File(file['path']!);
+
+      // Check if file exists
+      if (await currentFile.exists()) {
+        // Get directory and file extension
+        String directory = currentFile.parent.path;
+        String extension = '.mp3';
+
+        // Create new file path with new title
+        String newPath = '$directory/$newTitle$extension';
+
+        // Rename the file
+        await currentFile.rename(newPath);
+
+        // Update the file information in the list
+        setState(() {
+          int index = _downloadedFiles.indexWhere((item) => item['path'] == file['path']);
+          if (index != -1) {
+            _downloadedFiles[index] = {
+              'name': '$newTitle$extension',
+              'path': newPath
+            };
+
+            // If this is the currently playing song, update that reference too
+            if (_currentSong != null && _currentSong!['path'] == file['path']) {
+              _currentSong = _downloadedFiles[index];
+            }
+          }
+        });
+
+        _showMessage("File renamed successfully");
+      } else {
+        _showMessage("File not found");
+      }
+    } catch (e) {
+      debugPrint("Error renaming file: $e");
+      _showMessage("Error renaming file: $e");
+    }
+  }
+
+  void _showEditDialog(Map<String, String> file) {
+    String fileName = file['name'] ?? '';
+    // Remove the extension for editing
+    String fileNameWithoutExtension = fileName.endsWith('.mp3')
+        ? fileName.substring(0, fileName.length - 4)
+        : fileName;
+
+    final TextEditingController _titleController = TextEditingController(text: fileNameWithoutExtension);
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text("Edit Title"),
+          content: TextField(
+            controller: _titleController,
+            decoration: const InputDecoration(
+              labelText: "Title",
+              border: OutlineInputBorder(),
+            ),
+            autofocus: true,
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text("CANCEL"),
+            ),
+            TextButton(
+              onPressed: () {
+                String newTitle = _titleController.text.trim();
+                if (newTitle.isNotEmpty) {
+                  Navigator.of(context).pop();
+                  _renameFile(file, newTitle);
+                } else {
+                  _showMessage("Title cannot be empty");
+                }
+              },
+              child: const Text("SAVE"),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // Save downloaded files list to SharedPreferences
+  Future<void> _saveDownloadedFiles() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    // Convert the list of maps to a list of strings that can be stored in SharedPreferences
+    List<String> serializedFiles = _downloadedFiles.map((file) {
+      return "${file['name']}|${file['path']}";  // Using | as a separator
+    }).toList();
+
+    await prefs.setStringList('downloadedFiles', serializedFiles);
   }
 
   void _playMp3(String filePath) async {
@@ -455,6 +657,48 @@ class _HomePageState extends State<HomePage> {
                     ),
                     title: Text(_downloadedFiles[index]['name'] ?? 'Unknown'),
                     subtitle: Text(isPlaying ? "Now playing" : "Tap to play"),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // Edit button
+                        IconButton(
+                          icon: const Icon(Icons.edit, color: Colors.blue),
+                          onPressed: () {
+                            _showEditDialog(_downloadedFiles[index]);
+                          },
+                        ),
+                        // Delete button
+                        IconButton(
+                          icon: const Icon(Icons.delete, color: Colors.red),
+                          onPressed: () async {
+                            bool confirm = await showDialog(
+                              context: context,
+                              barrierDismissible: false,
+                              builder: (BuildContext context) {
+                                return AlertDialog(
+                                  title: const Text("Confirm Delete"),
+                                  content: Text("Are you sure you want to delete ${_downloadedFiles[index]['name']}?"),
+                                  actions: [
+                                    TextButton(
+                                      onPressed: () => Navigator.of(context).pop(false),
+                                      child: const Text("CANCEL"),
+                                    ),
+                                    TextButton(
+                                      onPressed: () => Navigator.of(context).pop(true),
+                                      child: const Text("DELETE"),
+                                    ),
+                                  ],
+                                );
+                              },
+                            );
+
+                            if (confirm) {
+                              _deleteFile(_downloadedFiles[index]);
+                            }
+                          },
+                        ),
+                      ],
+                    ),
                     onTap: () {
                       _showMusicPlayer(_downloadedFiles[index]);
                     },
@@ -472,12 +716,12 @@ class _HomePageState extends State<HomePage> {
             isScrollControlled: true,
             builder: (context) {
               return Padding(
-                padding: MediaQuery.of(context).viewInsets, // Avoid keyboard overlap
-                child: SingleChildScrollView( // Allow scrolling if needed
+                padding: MediaQuery.of(context).viewInsets,
+                child: SingleChildScrollView(
                   child: Container(
                     padding: const EdgeInsets.all(16),
                     child: Column(
-                      mainAxisSize: MainAxisSize.min, // Prevent unnecessary space usage
+                      mainAxisSize: MainAxisSize.min,
                       children: [
                         const Text(
                           "Enter YouTube URL",

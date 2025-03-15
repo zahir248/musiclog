@@ -49,6 +49,8 @@ dependencies:
   # rules and activating additional ones.
   flutter_lints: ^5.0.0
   audioplayers: ^5.2.1
+  permission_handler: ^11.2.0
+  shared_preferences: ^2.5.2
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -94,3 +96,6 @@ flutter:
 dependency_overrides:
   path_provider: ^2.1.5
   path_provider_android: ^2.2.16
+  permission_handler: ^11.2.0
+  shared_preferences: ^2.5.2
+
