@@ -12,9 +12,9 @@
     <uses-permission android:name="android.permission.INTERNET" />
 
     <application
-        android:label="musiclog"
+        android:label="MUSIK"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher"
+        android:icon="@mipmap/musik"
         android:requestLegacyExternalStorage="true">
         <activity
             android:name=".MainActivity"
