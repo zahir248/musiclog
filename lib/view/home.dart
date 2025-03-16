@@ -7,6 +7,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:dio/dio.dart';
 import 'package:fluttertoast/fluttertoast.dart';
 
+import '../config/config.dart';
+
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -28,9 +30,9 @@ class _HomePageState extends State<HomePage> {
 
   // Albums data structure
   List<Map<String, dynamic>> _albums = [];
-// Currently selected album (for filtering view)
+  // Currently selected album (for filtering view)
   Map<String, dynamic>? _currentAlbum;
-// Current view mode (all songs or album view)
+  // Current view mode (all songs or album view)
   String _viewMode = 'all'; // 'all' or 'album'
 
   // Track current playing song
@@ -107,6 +109,110 @@ class _HomePageState extends State<HomePage> {
 
   }
 
+  Future<void> _convertToMp3() async {
+    String youtubeUrl = _urlController.text.trim();
+    if (youtubeUrl.isEmpty) {
+      _showMessage("Please enter a YouTube URL.");
+      return;
+    }
+
+    // Request storage permissions for Android
+    if (Platform.isAndroid) {
+      var status = await Permission.storage.status;
+      if (!status.isGranted) {
+        status = await Permission.storage.request();
+        if (!status.isGranted) {
+          _showMessage("Storage permission is required");
+          return;
+        }
+      }
+    }
+
+    setState(() {
+      _isLoading = true;
+      _downloadProgress = 0.0; // Reset progress
+    });
+
+    try {
+      var apiUrl = '${Config.baseUrl}/download-mp3';
+
+      Dio dio = Dio();
+
+      // Make request to get the file
+      var response = await dio.post(
+        apiUrl,
+        data: {"url": youtubeUrl},
+        options: Options(
+          responseType: ResponseType.stream,
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+        ),
+        onReceiveProgress: (received, total) {
+          if (total != -1) {
+            setState(() {
+              _downloadProgress = received / total;
+            });
+          }
+        },
+      );
+
+      // Get and sanitize filename
+      String fileName = _extractFileName(response);
+      fileName = _sanitizeFileName(fileName); // Ensure valid filename
+
+      // Create app folder in device storage
+      Directory? directory;
+
+      if (Platform.isAndroid) {
+        directory = Directory('/storage/emulated/0/Download/YTtoMP3');
+      } else if (Platform.isIOS) {
+        directory = await getApplicationDocumentsDirectory();
+        directory = Directory('${directory.path}/YTtoMP3');
+      }
+
+      // Create directory if it doesn't exist
+      if (!(await directory!.exists())) {
+        await directory.create(recursive: true);
+      }
+
+      String filePath = "${directory.path}/$fileName";
+      File file = File(filePath);
+
+      // Write the file with progress tracking
+      List<int> bytes = [];
+      await for (var chunk in response.data.stream) {
+        bytes.addAll(chunk);
+      }
+
+      await file.writeAsBytes(bytes);
+
+      setState(() {
+        if (_audioPlayer.state != PlayerState.playing) {
+          _filePath = filePath;
+        }
+        _downloadedFiles.add({"name": fileName, "path": filePath});
+        _isLoading = false;
+        _downloadProgress = 1.0; // Complete
+      });
+
+      // Save the updated list to preferences
+      _saveDownloadedFiles();
+
+      _urlController.clear();
+
+      _showMessage("Download complete! File saved to ${directory.path}");
+    } catch (e) {
+      debugPrint("Error: $e");
+      _showMessage("Error: $e", isError: true);
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
   // Initialize albums from SharedPreferences
   Future<void> _loadAlbums() async {
     final prefs = await SharedPreferences.getInstance();
@@ -141,7 +247,7 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-// Save albums to SharedPreferences
+  // Save albums to SharedPreferences
   Future<void> _saveAlbums() async {
     final prefs = await SharedPreferences.getInstance();
 
@@ -153,7 +259,7 @@ class _HomePageState extends State<HomePage> {
     await prefs.setStringList('albums', serializedAlbums);
   }
 
-// Create a new album
+  // Create a new album
   void _createAlbum(String albumName) {
     if (albumName.trim().isEmpty) return;
 
@@ -172,7 +278,7 @@ class _HomePageState extends State<HomePage> {
     _showMessage("Album '$albumName' created");
   }
 
-// Delete an album
+  // Delete an album
   void _deleteAlbum(Map<String, dynamic> album) {
     setState(() {
       _albums.removeWhere((a) => a['id'] == album['id']);
@@ -207,7 +313,7 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-// Remove a song from an album
+  // Remove a song from an album
   void _removeSongFromAlbum(String songPath, String albumId) {
     int albumIndex = _albums.indexWhere((album) => album['id'] == albumId);
     if (albumIndex == -1) return;
@@ -223,7 +329,6 @@ class _HomePageState extends State<HomePage> {
     _showMessage("Song removed from '${_albums[albumIndex]['name']}'");
   }
 
-// Get songs for the current album
   // Get songs for the current album
   List<Map<String, String>> _getCurrentAlbumSongs() {
     if (_currentAlbum == null) return _downloadedFiles;
@@ -269,7 +374,7 @@ class _HomePageState extends State<HomePage> {
     _saveAlbums();
   }
 
-// Move a song down in album order
+  // Move a song down in album order
   void _moveSongDownInAlbum(String songPath, String albumId) {
     int albumIndex = _albums.indexWhere((album) => album['id'] == albumId);
     if (albumIndex == -1) return;
@@ -372,110 +477,6 @@ class _HomePageState extends State<HomePage> {
     } catch (e) {
       debugPrint("Error deleting file: $e");
       _showMessage("Error deleting file: $e", isError: true);
-    }
-  }
-
-  Future<void> _convertToMp3() async {
-    String youtubeUrl = _urlController.text.trim();
-    if (youtubeUrl.isEmpty) {
-      _showMessage("Please enter a YouTube URL.");
-      return;
-    }
-
-    // Request storage permissions for Android
-    if (Platform.isAndroid) {
-      var status = await Permission.storage.status;
-      if (!status.isGranted) {
-        status = await Permission.storage.request();
-        if (!status.isGranted) {
-          _showMessage("Storage permission is required");
-          return;
-        }
-      }
-    }
-
-    setState(() {
-      _isLoading = true;
-      _downloadProgress = 0.0; // Reset progress
-    });
-
-    try {
-      var apiUrl = "http://192.168.0.4:8000/api/download-mp3";
-
-      Dio dio = Dio();
-
-      // Make request to get the file
-      var response = await dio.post(
-        apiUrl,
-        data: {"url": youtubeUrl},
-        options: Options(
-          responseType: ResponseType.stream,
-          headers: {
-            'Accept': 'application/json',
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
-        ),
-        onReceiveProgress: (received, total) {
-          if (total != -1) {
-            setState(() {
-              _downloadProgress = received / total;
-            });
-          }
-        },
-      );
-
-      // Get and sanitize filename
-      String fileName = _extractFileName(response);
-      fileName = _sanitizeFileName(fileName); // Ensure valid filename
-
-      // Create app folder in device storage
-      Directory? directory;
-
-      if (Platform.isAndroid) {
-        directory = Directory('/storage/emulated/0/Download/YTtoMP3');
-      } else if (Platform.isIOS) {
-        directory = await getApplicationDocumentsDirectory();
-        directory = Directory('${directory.path}/YTtoMP3');
-      }
-
-      // Create directory if it doesn't exist
-      if (!(await directory!.exists())) {
-        await directory.create(recursive: true);
-      }
-
-      String filePath = "${directory.path}/$fileName";
-      File file = File(filePath);
-
-      // Write the file with progress tracking
-      List<int> bytes = [];
-      await for (var chunk in response.data.stream) {
-        bytes.addAll(chunk);
-      }
-
-      await file.writeAsBytes(bytes);
-
-      setState(() {
-        if (_audioPlayer.state != PlayerState.playing) {
-          _filePath = filePath;
-        }
-        _downloadedFiles.add({"name": fileName, "path": filePath});
-        _isLoading = false;
-        _downloadProgress = 1.0; // Complete
-      });
-
-      // Save the updated list to preferences
-      _saveDownloadedFiles();
-
-      _urlController.clear();
-
-      _showMessage("Download complete! File saved to ${directory.path}");
-    } catch (e) {
-      debugPrint("Error: $e");
-      _showMessage("Error: $e", isError: true);
-    } finally {
-      setState(() {
-        _isLoading = false;
-      });
     }
   }
 
@@ -1025,6 +1026,7 @@ class _HomePageState extends State<HomePage> {
       },
     );
   }
+
   void _showAlbumsDialog() {
     showDialog(
       context: context,
@@ -1110,7 +1112,6 @@ class _HomePageState extends State<HomePage> {
       },
     );
   }
-
 
   String _formatDuration(Duration duration) {
     String twoDigits(int n) => n.toString().padLeft(2, '0');
