@@ -205,7 +205,7 @@ class _HomePageState extends State<HomePage> {
       _showMessage("Download complete! File saved to ${directory.path}");
     } catch (e) {
       debugPrint("Error: $e");
-      _showMessage("Error: $e", isError: true);
+      _showMessage("Sorry, the server is busy now. Please try again later.", isError: true);
     } finally {
       setState(() {
         _isLoading = false;
